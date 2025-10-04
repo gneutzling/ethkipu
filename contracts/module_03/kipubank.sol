@@ -2,88 +2,35 @@
 
 pragma solidity 0.8.30;
 
-
 /**
  * @title KipuBank
- * @notice A simple vault contract that allows users to deposit and withdraw Ether with safety limits
- * @dev This contract implements a basic banking system with the following features:
- *      - Deposit functionality with bank capacity limits
- *      - Withdrawal functionality with per-transaction limits
- *      - Reentrancy protection using a custom modifier
- *      - Event emission for all deposits and withdrawals
- *      - Custom error handling for various failure scenarios
+ * @notice A vault contract for depositing and withdrawing Ether with safety limits
+ * @dev Features include:
+ *      - Deposit and withdrawal limits
+ *      - Reentrancy protection
+ *      - Event logging for transactions
+ *      - Custom error handling
  * 
- * Security Features:
- * - Maximum bank capacity to prevent excessive funds accumulation
- * - Per-withdrawal limit to control risk exposure
- * - Reentrancy guard to prevent malicious contract interactions
- * - CEI pattern (Checks-Effects-Interactions) implementation
+ * Security:
+ * - Bank capacity and withdrawal limits
+ * - Reentrancy guard
+ * - CEI pattern (Checks-Effects-Interactions)
  * 
- * @author Gabriel Neutzling
- * @custom:educational This contract is designed for learning purposes and demonstrates
- *                      custom errors, events, modifiers, and best practices in Solidity
+ * @custom:educational Designed for learning purposes, demonstrating best practices in Solidity
  */
+
 contract KipuBank {
-    /**
-     * @notice Thrown when a deposit would exceed the bank's maximum capacity
-     * @param totalBalance The current total balance in the bank
-     * @param depositAmount The amount being deposited
-     * @param bankCap The maximum capacity allowed for the bank
-     */
+    // Custom errors
     error BankCapacityExceeded(uint256 totalBalance, uint256 depositAmount, uint256 bankCap);
-    
-    /**
-     * @notice Thrown when a withdrawal amount exceeds the per-transaction limit
-     * @param requested The amount requested for withdrawal
-     * @param limit The maximum amount allowed per withdrawal
-     */
     error WithdrawLimitExceeded(uint256 requested, uint256 limit);
-    
-    /**
-     * @notice Thrown when a user attempts to withdraw more than their account balance
-     * @param requested The amount the user requested to withdraw
-     * @param accountBalance The user's current account balance
-     */
     error InsufficientBalance(uint256 requested, uint256 accountBalance);
-    
-    /**
-     * @notice Thrown when a zero amount is provided for operations that require a positive value
-     */
-    error ZeroAmountNotAllowed();
-    
-    /**
-     * @notice Thrown when the Ether transfer to the user fails during withdrawal
-     * @param receiver The address that should have received the Ether
-     * @param amount The amount that failed to transfer
-     */
     error EtherTransferFailed(address receiver, uint256 amount);
-    
-    /**
-     * @notice Thrown when contract initialization fails due to invalid parameters
-     * @param bankCap The bank capacity value that caused the failure
-     * @param withdrawLimit The withdraw limit value used for validation
-     */
     error InvalidConstructorParams(uint256 bankCap, uint256 withdrawLimit);
-    
-    /**
-     * @notice Thrown when a reentrancy attack is detected
-     * @dev This error is triggered by the noReentrancy modifier when the locked state is true
-     */
+    error ZeroAmountNotAllowed();
     error ReentrancyDetected();
 
-
-    /**
-     * @notice Emitted when a user successfully deposits Ether into the bank
-     * @param user The address of the user who made the deposit
-     * @param amount The amount of Ether deposited in wei
-     */
+    // Events
     event Deposited(address indexed user, uint256 amount);
-    
-    /**
-     * @notice Emitted when a user successfully withdraws Ether from the bank
-     * @param user The address of the user who made the withdrawal
-     * @param amount The amount of Ether withdrawn in wei
-     */
     event Withdrawn(address indexed user, uint256 amount);
 
 
@@ -105,30 +52,13 @@ contract KipuBank {
      */
     mapping(address => uint256) public balances;
     
-    /**
-     * @notice Total number of deposits made to the bank
-     * @dev Incremented with each successful deposit operation
-     */
+    // Counters (deposits and withdrawals)
     uint256 public depositCount = 0;
-    
-    /**
-     * @notice Total number of withdrawals made from the bank
-     * @dev Incremented with each successful withdrawal operation
-     */
     uint256 public withdrawCount = 0;
     
-    /**
-     * @dev Reentrancy guard state variable
-     * @notice Used by the noReentrancy modifier to prevent reentrancy attacks
-     */
+    // Reentrancy guard state variable
     bool private locked;
 
-
-    /**
-     * @notice Initializes the KipuBank contract with a maximum capacity
-     * @param _bankCap The maximum amount of Ether the bank can hold
-     * @dev The bank capacity must be greater than the withdraw limit and non-zero
-     */
     constructor(uint256 _bankCap) {
         if (_bankCap == 0 || _bankCap <= WITHDRAW_LIMIT) revert InvalidConstructorParams(_bankCap, WITHDRAW_LIMIT);
 
