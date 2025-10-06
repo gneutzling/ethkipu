@@ -109,7 +109,7 @@ contract KipuBank is AccessControl {
      *      Automatically credits the sender's balance using the internal _deposit function
      */
     receive() external payable {
-        _deposit(msg.sender, address(0), msg.value);
+        _deposit(msg.sender, ETH_ALIAS, msg.value);
     }
 
     
@@ -124,7 +124,7 @@ contract KipuBank is AccessControl {
             if (msg.value == 0) revert ZeroAmountNotAllowed();
             if (_amount != 0) revert NonZeroAmountForETH();
 
-            _deposit(msg.sender, _token, msg.value);
+            _deposit(msg.sender, ETH_ALIAS, msg.value);
         } 
         // ERC20 deposit
         else {
@@ -174,7 +174,9 @@ contract KipuBank is AccessControl {
         // 1. Check
         if (_amount == 0) revert ZeroAmountNotAllowed();
 
-        uint256 tokenBalance = balances[msg.sender][_token];
+        address canonicalToken = canonical(_token);
+
+        uint256 tokenBalance = balances[msg.sender][canonicalToken];
         if (tokenBalance < _amount) revert InsufficientBalance(_token, _amount, tokenBalance);
 
         uint256 usdValue = 0;
@@ -186,7 +188,7 @@ contract KipuBank is AccessControl {
         }
 
         // 2. Effect
-        balances[msg.sender][_token] -= _amount;
+        balances[msg.sender][canonicalToken] -= _amount;
         withdrawCount++;
 
         // 3. Interaction
@@ -197,7 +199,7 @@ contract KipuBank is AccessControl {
             IERC20(_token).safeTransfer(msg.sender, _amount);
         }
 
-        emit Withdrawn(msg.sender, _token, _amount, usdValue);
+        emit Withdrawn(msg.sender, canonicalToken, _amount, usdValue);
     }
 
 
@@ -250,17 +252,23 @@ contract KipuBank is AccessControl {
     }
 
     function isETH(address token) internal pure returns (bool) {
-        return token == address(0);
+        return token == address(0) || token == ETH_ALIAS;
+    }
+
+    function canonical(address token) internal pure returns (address) {
+        return isETH(token) ? ETH_ALIAS : token;
     }
 
 
     // Only managers
     function recoverFunds(address _user, address _token, uint256 _newBalance) external onlyRole(MANAGER_ROLE) {
         if (_user == address(0)) revert ZeroAddressNotAllowed();
-        
-        balances[_user][_token] = _newBalance;
 
-        emit FundsRecovered(msg.sender, _user, _token, _newBalance);
+        address canonicalToken = canonical(_token);
+        
+        balances[_user][canonicalToken] = _newBalance;
+
+        emit FundsRecovered(msg.sender, _user, canonicalToken, _newBalance);
     }
 
 }
