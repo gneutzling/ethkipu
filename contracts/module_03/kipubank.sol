@@ -21,38 +21,37 @@ pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+
 
 using SafeERC20 for IERC20;
 
 contract KipuBank {
-    // Custom errors
+    // Errors
     error BankCapacityExceeded(uint256 totalBalance, uint256 depositAmount, uint256 bankCap);
-    error WithdrawLimitExceeded(uint256 requested, uint256 limit);
+    error WithdrawLimitExceeded(uint256 usdValue, uint256 usdLimit);
     error InsufficientBalance(address token, uint256 requested, uint256 accountBalance);
     error EtherTransferFailed(address receiver, uint256 amount);
-    error InvalidConstructorParams(uint256 bankCap, uint256 withdrawLimit);
+    error InvalidConstructorParams(uint256 bankCap);
     error ZeroAmountNotAllowed();
     error NonZeroAmountForETH();
     error UnexpectedMsgValue();
     error ReentrancyDetected();
     error ERC20TransferFailed(address token, uint256 amount);
+    error InvalidOraclePrice();
 
     // Events
     event Deposited(address indexed user, address indexed token, uint256 amount);
-    event Withdrawn(address indexed user, address indexed token, uint256 amount);
+    event Withdrawn(address indexed user, address indexed token, uint256 amount, uint256 usdValue);
 
+    // Constants
+    uint8 public constant ORACLE_DECIMALS = 8;
+    uint256 public constant MAX_WITHDRAW_USD = 1000 * 1e8; // $1000 with 8 decimals precision
+    uint256 private constant ETH_DECIMALS = 1e18;
 
-    /**
-     * @notice Maximum amount that can be withdrawn in a single transaction
-     * @dev Set to 0.1 ether to limit risk exposure per withdrawal
-     */
-    uint256 public constant WITHDRAW_LIMIT = 0.1 ether;
-    
-    /**
-     * @notice Maximum total capacity the bank can hold
-     * @dev Set during contract deployment and cannot be changed afterwards
-     */
-    uint256 public immutable BANK_CAP;
+    // Immutables
+    AggregatorV3Interface public immutable priceFeed; // Chainlink ETH/USD feed
+    uint256 public immutable BANK_CAP; // total allowed ETH in the bank
     
     /**
      * @notice Mapping of user addresses to their deposited token balances
@@ -61,18 +60,19 @@ contract KipuBank {
      *      token == address(0) => ETH
      */
     mapping(address user => mapping(address token => uint256)) public balances;
-    
-    // Counters (deposits and withdrawals)
+
     uint256 public depositCount = 0;
     uint256 public withdrawCount = 0;
-    
+
     // Reentrancy guard state variable
     bool private locked;
 
-    constructor(uint256 _bankCap) {
-        if (_bankCap == 0 || _bankCap <= WITHDRAW_LIMIT) revert InvalidConstructorParams(_bankCap, WITHDRAW_LIMIT);
+
+    constructor(uint256 _bankCap, address _priceFeed) {
+        if (_bankCap == 0) revert InvalidConstructorParams(_bankCap, 0);
 
         BANK_CAP = _bankCap;
+        priceFeed = AggregatorV3Interface(_priceFeed);
     }
 
 
@@ -164,7 +164,13 @@ contract KipuBank {
         uint256 tokenBalance = balances[msg.sender][_token];
         if (tokenBalance < _amount) revert InsufficientBalance(_token, _amount, tokenBalance);
 
-        if (_token == address(0) && _amount > WITHDRAW_LIMIT) revert WithdrawLimitExceeded(_amount, WITHDRAW_LIMIT);
+        if (_token == address(0)) {
+            uint256 usdValue = convertEthToUsd(_amount);
+            
+            if (usdValue > MAX_WITHDRAW_USD) {
+                revert WithdrawLimitExceeded(usdValue, MAX_WITHDRAW_USD);
+            }
+        }
 
         // 2. Effect
         balances[msg.sender][_token] -= _amount;
@@ -178,7 +184,7 @@ contract KipuBank {
             IERC20(_token).safeTransfer(msg.sender, _amount);
         }
 
-        emit Withdrawn(msg.sender, _token, _amount);
+        emit Withdrawn(msg.sender, _token, _amount, usdValue);
     }
 
 
@@ -202,4 +208,32 @@ contract KipuBank {
     function getRemainingCapacity() external view returns (uint256) {
         return BANK_CAP - address(this).balance;
     }
+    
+
+    /**
+     * @notice Retrieves the latest ETH/USD price from the Chainlink oracle
+     * @return The latest ETH/USD price with 8 decimals
+     * @dev Ensures the price is greater than zero to validate oracle data
+     */
+    function getEthUsdPrice() internal view returns (uint256) {
+        (, int256 answer,,,) = priceFeed.latestRoundData();
+        
+        if (answer <= 0) revert InvalidOraclePrice();
+        
+        return uint256(answer);
+    }
+    
+    /**
+     * @notice Converts a given amount of Ether in wei to its USD value
+     * @param ethAmountWei The amount of Ether in wei to be converted
+     * @return The USD value of the given Ether amount with 8 decimals
+     * @dev Uses the latest ETH/USD price from the oracle for conversion
+     *      The result maintains 8 decimals as per the price feed
+     */
+    function convertEthToUsd(uint256 ethAmountWei) internal view returns (uint256) {
+        uint256 price = getEthUsdPrice();
+        uint256 usdValue = (ethAmountWei * price) / ETH_DECIMALS;
+        return usdValue;
+    }
+
 }
