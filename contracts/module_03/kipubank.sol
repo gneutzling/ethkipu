@@ -1,22 +1,10 @@
 // SPDX-License-Identifier: MIT
-
 pragma solidity 0.8.30;
 
 /**
  * @title KipuBank
  * @notice A vault contract for depositing and withdrawing Ether with safety limits
- * @dev Features include:
- *      - Deposit and withdrawal limits
- *      - Reentrancy protection
- *      - Event logging for transactions
- *      - Custom error handling
- * 
- * Security:
- * - Bank capacity and withdrawal limits
- * - Reentrancy guard
- * - CEI pattern (Checks-Effects-Interactions)
- * 
- * @custom:educational Designed for learning purposes, demonstrating best practices in Solidity
+ * @dev Educational, showing production-lean patterns (CEI, reentrancy guard, OZ, Chainlink, EIP-7528).
  */
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -25,281 +13,217 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { AggregatorV3Interface } from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
 
-
 using SafeERC20 for IERC20;
 
 contract KipuBank is AccessControl {
-    // Roles
-    bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
+    // ========= Constants / Roles =========
+    uint8   public constant ORACLE_DECIMALS     = 8;
+    uint8   public constant ACCOUNTING_DECIMALS = 6; // USDC-like accounting
+    uint256 public constant MAX_WITHDRAW_USD    = 1000 * 1e8; // 8 decimals
+    uint256 public constant ORACLE_STALE_AFTER  = 1 hours;
+    address public constant ETH_ALIAS           = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+    bytes32 public constant MANAGER_ROLE        = keccak256("MANAGER_ROLE");
 
-    // Errors
-    error BankCapacityExceeded(uint256 totalBalance, uint256 depositAmount, uint256 bankCap);
-    error WithdrawLimitExceeded(uint256 usdValue, uint256 usdLimit);
-    error InsufficientBalance(address token, uint256 requested, uint256 accountBalance);
-    error EtherTransferFailed(address receiver, uint256 amount);
-    error ZeroAmountNotAllowed();
-    error NonZeroAmountForETH();
-    error UnexpectedMsgValue();
-    error ReentrancyDetected();
-    error ERC20TransferFailed(address token, uint256 amount);
-    error InvalidOraclePrice();
-    error ZeroAddressNotAllowed();
-    error ZeroBankCapNotAllowed();
+    uint256 private constant ETH_DECIMALS = 1e18;
 
-    // Events
+    // ========= User-defined value types (units) =========
+    // These add unit safety internally (compile down to uint256).
+    type Wei   is uint256; // ETH base-1e18
+    type Usd8  is uint256; // 8-dec USD (Chainlink)
+    type Usdc6 is uint256; // 6-dec accounting
+
+    // small helpers
+    function _wei(uint256 v)  internal pure returns (Wei)  { return Wei.wrap(v);  }
+    function _usd8(uint256 v) internal pure returns (Usd8) { return Usd8.wrap(v); }
+    function _unwrapWei(Wei v)  internal pure returns (uint256) { return Wei.unwrap(v);  }
+    function _unwrapUsd8(Usd8 v) internal pure returns (uint256) { return Usd8.unwrap(v); }
+
+    // ========= Immutables / Storage =========
+    AggregatorV3Interface public immutable priceFeed; // Chainlink ETH/USD
+    uint256 public immutable BANK_CAP;
+
+    // balances[user][token]; token == ETH_ALIAS => ETH (EIP-7528 style)
+    mapping(address user => mapping(address token => uint256)) public balances;
+    uint256 public depositCount;
+    uint256 public withdrawCount;
+
+    bool private locked; // reentrancy lock
+
+    // ========= Events =========
     event Deposited(address indexed user, address indexed token, uint256 amount);
     event Withdrawn(address indexed user, address indexed token, uint256 amount, uint256 usdValue);
     event FundsRecovered(address indexed manager, address indexed user, address indexed token, uint256 amount);
 
-    // Constants
-    uint8 public constant ORACLE_DECIMALS = 8;
-    uint8 public constant ACCOUNTING_DECIMALS = 6; // USDC
-    uint256 public constant MAX_WITHDRAW_USD = 1000 * 1e8; // $1000 with 8 decimals precision
-    uint256 private constant ETH_DECIMALS = 1e18;
-    address public constant ETH_ALIAS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+    // ========= Errors =========
+    error BankCapacityExceeded(uint256 currentBalance, uint256 depositAmount, uint256 maxCapacity);
+    error WithdrawLimitExceeded(uint256 requestedUsdValue, uint256 maxUsdLimit);
+    error InsufficientBalance(address token, uint256 requestedAmount, uint256 availableBalance);
+    error ZeroAmountNotAllowed();
+    error NonZeroAmountForETH();
+    error UnexpectedMsgValue();
+    error EtherTransferFailed(address recipient, uint256 amount);
+    error ReentrancyDetected();
+    error InvalidOraclePrice(int256 price);
+    error StaleOracleData(uint256 updatedAt);
+    error ZeroAddressNotAllowed();
+    error ZeroBankCapNotAllowed();
 
-
-
-    // Immutables
-    AggregatorV3Interface public immutable priceFeed; // Chainlink ETH/USD feed
-    uint256 public immutable BANK_CAP; // total allowed ETH in the bank
-    
-    /**
-     * @notice Mapping of user addresses to their deposited token balances
-     * @dev Tracks how much of each token type each user has deposited in the bank
-     *      balances[user][token] => user's balance in a specific token
-    *      token == ETH_ALIAS => ETH
-     */
-    mapping(address user => mapping(address token => uint256)) public balances;
-
-    uint256 public depositCount = 0;
-    uint256 public withdrawCount = 0;
-    
-
-    // Reentrancy guard state variable
-    bool private locked;
-
-
-    constructor(uint256 _bankCap, address _priceFeed) {
-        if (_bankCap == 0) revert ZeroBankCapNotAllowed();
-
-        BANK_CAP = _bankCap;
-        priceFeed = AggregatorV3Interface(_priceFeed);
-
-        // Assign roles
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(MANAGER_ROLE, msg.sender);
-    }
-
-
-    /**
-     * @notice Prevents reentrancy attacks by using a simple lock mechanism
-     * @dev Sets locked to true before function execution and false after completion
-     *      Reverts if the function is called while already executing
-     */
+    // ========= Modifiers =========
     modifier noReentrancy() {
         if (locked) revert ReentrancyDetected();
-
         locked = true;
         _;
         locked = false;
     }
 
+    // ========= Constructor =========
+    constructor(uint256 _bankCap, address _priceFeed) {
+        if (_bankCap == 0) revert ZeroBankCapNotAllowed();
+        if (_priceFeed == address(0)) revert ZeroAddressNotAllowed();
 
-    /**
-     * @notice Allows the contract to receive Ether directly and automatically deposit it
-     * @dev Called when Ether is sent to the contract without any function call data
-     *      Automatically credits the sender's balance using the internal _deposit function
-     */
+        BANK_CAP = _bankCap;
+        priceFeed = AggregatorV3Interface(_priceFeed);
+        
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(MANAGER_ROLE, msg.sender);
+    }
+
+    // ========= Fallback (ETH) =========
     receive() external payable {
         _deposit(msg.sender, ETH_ALIAS, msg.value);
     }
 
-    
+    // ========= External =========
     /**
-     * @notice Allows users to deposit Ether into their bank account
-     * @dev Calls the internal _deposit function to handle the deposit logic
-     *      Requires sending Ether with the transaction (payable)
+     * @notice Deposit ETH (address(0) or ETH_ALIAS) or ERC20.
+     * For ERC20, we credit the actual `received` amount (fee-on-transfer safe).
      */
     function deposit(address _token, uint256 _amount) external payable noReentrancy {
-        // ETH deposit
         if (isETH(_token)) {
             if (msg.value == 0) revert ZeroAmountNotAllowed();
             if (_amount != 0) revert NonZeroAmountForETH();
-
             _deposit(msg.sender, ETH_ALIAS, msg.value);
-        } 
-        // ERC20 deposit
-        else {
+        } else {
             if (msg.value != 0) revert UnexpectedMsgValue();
             if (_amount == 0) revert ZeroAmountNotAllowed();
 
-            IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
-            _deposit(msg.sender, _token, _amount);
+            // fee-on-transfer safe: credit only what was actually received
+            IERC20 token = IERC20(_token);
+            uint256 beforeBal = token.balanceOf(address(this));
+            token.safeTransferFrom(msg.sender, address(this), _amount);
+            uint256 received = token.balanceOf(address(this)) - beforeBal;
+
+            _deposit(msg.sender, _token, received);
         }
     }
 
-
-    /**
-     * @notice Handles the logic for depositing tokens or Ether into the bank
-     * @param _user The address of the user making the deposit
-     * @param _token The address of the token being deposited; use ETH_ALIAS for Ether
-     * @param _amount The amount being deposited, in wei for Ether or smallest unit for tokens
-     * @dev Ensures the deposit amount is non-zero and does not exceed the bank's capacity
-     *      Updates the user's balance and increments the deposit count
-     *      Emits a Deposited event upon successful deposit
-     *      Invoked by both the deposit() and receive() functions
-     */
-    function _deposit(address _user, address _token, uint256 _amount) private {
-        // 1. Check
-        if (_amount == 0) revert ZeroAmountNotAllowed();
-        if (isETH(_token) && address(this).balance > BANK_CAP) {
-            revert BankCapacityExceeded(address(this).balance, _amount, BANK_CAP);
-        }
-
-        // 2. Effect
-        balances[_user][_token] += _amount;
-        depositCount++;
-
-        // 3. Interaction
-        emit Deposited(_user, _token, _amount);
-    }
-
-
-    /**
-     * @notice Allows users to withdraw Ether from their bank account
-     * @param _amount The amount of Ether to withdraw (in wei)
-     * @dev Implements the CEI pattern (Checks-Effects-Interactions) for security
-     *      Protected against reentrancy attacks using the noReentrancy modifier
-     *      Validates amount is non-zero, within user balance, and under withdrawal limit
-     */
     function withdraw(address _token, uint256 _amount) external noReentrancy {
-        // 1. Check
         if (_amount == 0) revert ZeroAmountNotAllowed();
 
         address canon = canonical(_token);
+        uint256 bal = balances[msg.sender][canon];
+        if (bal < _amount) revert InsufficientBalance(_token, _amount, bal);
 
-        uint256 tokenBalance = balances[msg.sender][canon];
-        if (tokenBalance < _amount) revert InsufficientBalance(_token, _amount, tokenBalance);
+        bool native = isETH(_token);
+        uint256 usdValueOut = 0;
 
-        uint256 usdValue = 0;
-
-        if (isETH(_token)) {
-            usdValue = convertEthToUsd(_amount);
-
-            if (usdValue > MAX_WITHDRAW_USD) revert WithdrawLimitExceeded(usdValue, MAX_WITHDRAW_USD);
+        if (native) {
+            // use types: Wei -> Usd8
+            Usd8 usdValue = convertEthToUsd(_wei(_amount));
+            if (_unwrapUsd8(usdValue) > MAX_WITHDRAW_USD) {
+                revert WithdrawLimitExceeded(_unwrapUsd8(usdValue), MAX_WITHDRAW_USD);
+            }
+            usdValueOut = _unwrapUsd8(usdValue);
         }
 
-        // 2. Effect
-        balances[msg.sender][canon] -= _amount;
-        withdrawCount++;
+        balances[msg.sender][canon] = bal - _amount;
+        unchecked { withdrawCount++; }
 
-        // 3. Interaction
-        if (isETH(_token)) {
+        if (native) {
             (bool sent, ) = payable(msg.sender).call{value: _amount}("");
             if (!sent) revert EtherTransferFailed(msg.sender, _amount);
         } else {
-            IERC20(_token).safeTransfer(msg.sender, _amount);
+            IERC20(canon).safeTransfer(msg.sender, _amount);
         }
 
-        emit Withdrawn(msg.sender, canon, _amount, usdValue);
+        emit Withdrawn(msg.sender, canon, _amount, usdValueOut);
     }
 
+    function recoverFunds(address _user, address _token, uint256 _newBalance)
+        external
+        onlyRole(MANAGER_ROLE)
+    {
+        if (_user == address(0)) revert ZeroAddressNotAllowed();
+        address canon = canonical(_token);
+        balances[_user][canon] = _newBalance;
+        emit FundsRecovered(msg.sender, _user, canon, _newBalance);
+    }
 
-    /**
-     * @notice Returns the total Ether balance held by the bank contract
-     * @return The total amount of Ether in the contract in wei
-     * @dev This represents the sum of all user deposits currently held by the bank
-     *      This is a view function that doesn't modify state
-     */
+    // ========= Public Views =========
     function getBankBalance() external view returns (uint256) {
         return address(this).balance;
     }
 
-
-    /**
-     * @notice Returns the remaining capacity of the bank
-     * @return The remaining capacity of the bank in wei
-     * @dev This represents the difference between the bank capacity and the current balance
-     *      This is a view function that doesn't modify state
-     */
     function getRemainingCapacity() external view returns (uint256) {
         return BANK_CAP - address(this).balance;
-    }
-    
-
-    /**
-     * @notice Retrieves the latest ETH/USD price from the Chainlink oracle
-     * @return The latest ETH/USD price with 8 decimals
-     * @dev Ensures the price is greater than zero to validate oracle data
-     */
-    function getEthUsdPrice() internal view returns (uint256) {
-        (, int256 answer,,,) = priceFeed.latestRoundData();
-        
-        if (answer <= 0) revert InvalidOraclePrice();
-        
-        return uint256(answer);
-    }
-    
-    /**
-     * @notice Converts a given amount of Ether in wei to its USD value
-     * @param ethAmountWei The amount of Ether in wei to be converted
-     * @return The USD value of the given Ether amount with 8 decimals
-     * @dev Uses the latest ETH/USD price from the oracle for conversion
-     *      The result maintains 8 decimals as per the price feed
-     */
-    function convertEthToUsd(uint256 ethAmountWei) internal view returns (uint256) {
-        uint256 price = getEthUsdPrice();
-        uint256 usdValue = (ethAmountWei * price) / ETH_DECIMALS;
-        return usdValue;
-    }
-
-    function isETH(address _token) internal pure returns (bool) {
-        return _token == address(0) || _token == ETH_ALIAS;
-    }
-
-    function canonical(address _token) internal pure returns (address) {
-        return isETH(_token) ? ETH_ALIAS : _token;
-    }
-
-    function tokenDecimals(address _token) internal view returns (uint8) {
-        if (isETH(_token)) return 18;
-
-        // try to read via IERC20Metadata; if the token does not implement it, assumes 18
-        try IERC20Metadata(_token).decimals() returns (uint8 decimals) {
-            return decimals;
-        } catch {
-            return 18;
-        }
-    }
-
-    function convertToAccountingUnits(uint256 _amount, uint8 _decimals) internal pure returns (uint256) {
-        if (_decimals == ACCOUNTING_DECIMALS) return _amount;
-        if (_decimals > ACCOUNTING_DECIMALS) {
-            return _amount / (10 ** (_decimals - ACCOUNTING_DECIMALS));
-        } else {
-            return _amount * (10 ** (ACCOUNTING_DECIMALS - _decimals));
-        }
     }
 
     function balanceInUSDCDecimals(address _user, address _token) external view returns (uint256) {
         address canon = canonical(_token);
         uint256 amount = balances[_user][canon];
         uint8 decimals = tokenDecimals(canon);
-
         return convertToAccountingUnits(amount, decimals);
     }
 
-
-    // Only managers
-    function recoverFunds(address _user, address _token, uint256 _newBalance) external onlyRole(MANAGER_ROLE) {
-        if (_user == address(0)) revert ZeroAddressNotAllowed();
-
-        address canon = canonical(_token);
-        
-        balances[_user][canon] = _newBalance;
-
-        emit FundsRecovered(msg.sender, _user, canon, _newBalance);
+    // ========= Internal =========
+    function _deposit(address _user, address _token, uint256 _amount) private {
+        if (_amount == 0) revert ZeroAmountNotAllowed();
+        // for ETH, check cap after deposit (msg.value already added to contract balance)
+        if (isETH(_token) && address(this).balance > BANK_CAP) {
+            revert BankCapacityExceeded(address(this).balance, _amount, BANK_CAP);
+        }
+        balances[_user][_token] += _amount;
+        unchecked { depositCount++; }
+        emit Deposited(_user, _token, _amount);
     }
 
+    /// @notice Chainlink price with simple freshness window
+    function getEthUsdPrice() internal view returns (uint256) {
+        ( , int256 answer, , uint256 updatedAt, ) = priceFeed.latestRoundData();
+        
+        if (answer <= 0) revert InvalidOraclePrice(answer);
+
+        // Reverts if the price update is older than ORACLE_STALE_AFTER.
+        if (block.timestamp - updatedAt > ORACLE_STALE_AFTER) revert StaleOracleData(updatedAt);
+        
+        return uint256(answer); // 8 decimals
+    }
+
+    /// @notice Typed converter: Wei -> Usd8 (internal)
+    function convertEthToUsd(Wei _ethAmount) internal view returns (Usd8) {
+        uint256 price = getEthUsdPrice(); // 8 decimals
+        uint256 usdValue = (_unwrapWei(_ethAmount) * price) / ETH_DECIMALS;
+        return _usd8(usdValue);
+    }
+
+    // ========= Token utils =========
+    function isETH(address _token) internal pure returns (bool) {
+        return _token == address(0) || _token == ETH_ALIAS;
+    }
+    function canonical(address _token) internal pure returns (address) {
+        return isETH(_token) ? ETH_ALIAS : _token;
+    }
+    function tokenDecimals(address _token) internal view returns (uint8) {
+        if (isETH(_token)) return 18;
+        try IERC20Metadata(_token).decimals() returns (uint8 d) { return d; } catch { return 18; }
+    }
+
+    // ========= Decimals conversion (accounting) =========
+    function convertToAccountingUnits(uint256 _amount, uint8 _decimals) internal pure returns (uint256) {
+        if (_decimals == ACCOUNTING_DECIMALS) return _amount;
+        if (_decimals > ACCOUNTING_DECIMALS) {
+            return _amount / (10 ** (_decimals - ACCOUNTING_DECIMALS));
+        }
+        return _amount * (10 ** (ACCOUNTING_DECIMALS - _decimals));
+    }
 }
