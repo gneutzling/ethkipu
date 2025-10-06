@@ -19,35 +19,43 @@ pragma solidity 0.8.30;
  * @custom:educational Designed for learning purposes, demonstrating best practices in Solidity
  */
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { AggregatorV3Interface } from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
 
 
 using SafeERC20 for IERC20;
 
-contract KipuBank {
+contract KipuBank is AccessControl {
+    // Roles
+    bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
+
     // Errors
     error BankCapacityExceeded(uint256 totalBalance, uint256 depositAmount, uint256 bankCap);
     error WithdrawLimitExceeded(uint256 usdValue, uint256 usdLimit);
     error InsufficientBalance(address token, uint256 requested, uint256 accountBalance);
     error EtherTransferFailed(address receiver, uint256 amount);
-    error InvalidConstructorParams(uint256 bankCap);
     error ZeroAmountNotAllowed();
     error NonZeroAmountForETH();
     error UnexpectedMsgValue();
     error ReentrancyDetected();
     error ERC20TransferFailed(address token, uint256 amount);
     error InvalidOraclePrice();
+    error ZeroAddressNotAllowed();
+    error ZeroBankCapNotAllowed();
 
     // Events
     event Deposited(address indexed user, address indexed token, uint256 amount);
     event Withdrawn(address indexed user, address indexed token, uint256 amount, uint256 usdValue);
+    event FundsRecovered(address indexed manager, address indexed user, address indexed token, uint256 amount);
 
     // Constants
     uint8 public constant ORACLE_DECIMALS = 8;
     uint256 public constant MAX_WITHDRAW_USD = 1000 * 1e8; // $1000 with 8 decimals precision
     uint256 private constant ETH_DECIMALS = 1e18;
+    address public constant ETH_ALIAS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
 
     // Immutables
     AggregatorV3Interface public immutable priceFeed; // Chainlink ETH/USD feed
@@ -57,22 +65,27 @@ contract KipuBank {
      * @notice Mapping of user addresses to their deposited token balances
      * @dev Tracks how much of each token type each user has deposited in the bank
      *      balances[user][token] => user's balance in a specific token
-     *      token == address(0) => ETH
+    *      token == ETH_ALIAS => ETH
      */
     mapping(address user => mapping(address token => uint256)) public balances;
 
     uint256 public depositCount = 0;
     uint256 public withdrawCount = 0;
+    
 
     // Reentrancy guard state variable
     bool private locked;
 
 
     constructor(uint256 _bankCap, address _priceFeed) {
-        if (_bankCap == 0) revert InvalidConstructorParams(_bankCap, 0);
+        if (_bankCap == 0) revert ZeroBankCapNotAllowed();
 
         BANK_CAP = _bankCap;
         priceFeed = AggregatorV3Interface(_priceFeed);
+
+        // Assign roles
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(MANAGER_ROLE, msg.sender);
     }
 
 
@@ -107,7 +120,7 @@ contract KipuBank {
      */
     function deposit(address _token, uint256 _amount) external payable noReentrancy {
         // ETH deposit
-        if (_token == address(0)) {
+        if (isETH(_token)) {
             if (msg.value == 0) revert ZeroAmountNotAllowed();
             if (_amount != 0) revert NonZeroAmountForETH();
 
@@ -127,7 +140,7 @@ contract KipuBank {
     /**
      * @notice Handles the logic for depositing tokens or Ether into the bank
      * @param _user The address of the user making the deposit
-     * @param _token The address of the token being deposited; use address(0) for Ether
+     * @param _token The address of the token being deposited; use ETH_ALIAS for Ether
      * @param _amount The amount being deposited, in wei for Ether or smallest unit for tokens
      * @dev Ensures the deposit amount is non-zero and does not exceed the bank's capacity
      *      Updates the user's balance and increments the deposit count
@@ -137,7 +150,7 @@ contract KipuBank {
     function _deposit(address _user, address _token, uint256 _amount) private {
         // 1. Check
         if (_amount == 0) revert ZeroAmountNotAllowed();
-        if (_token == address(0) && address(this).balance > BANK_CAP) {
+        if (isETH(_token) && address(this).balance > BANK_CAP) {
             revert BankCapacityExceeded(address(this).balance, _amount, BANK_CAP);
         }
 
@@ -164,12 +177,12 @@ contract KipuBank {
         uint256 tokenBalance = balances[msg.sender][_token];
         if (tokenBalance < _amount) revert InsufficientBalance(_token, _amount, tokenBalance);
 
-        if (_token == address(0)) {
-            uint256 usdValue = convertEthToUsd(_amount);
-            
-            if (usdValue > MAX_WITHDRAW_USD) {
-                revert WithdrawLimitExceeded(usdValue, MAX_WITHDRAW_USD);
-            }
+        uint256 usdValue = 0;
+
+        if (isETH(_token)) {
+            usdValue = convertEthToUsd(_amount);
+
+            if (usdValue > MAX_WITHDRAW_USD) revert WithdrawLimitExceeded(usdValue, MAX_WITHDRAW_USD);
         }
 
         // 2. Effect
@@ -177,7 +190,7 @@ contract KipuBank {
         withdrawCount++;
 
         // 3. Interaction
-        if (_token == address(0)) {
+        if (isETH(_token)) {
             (bool sent, ) = payable(msg.sender).call{value: _amount}("");
             if (!sent) revert EtherTransferFailed(msg.sender, _amount);
         } else {
@@ -234,6 +247,20 @@ contract KipuBank {
         uint256 price = getEthUsdPrice();
         uint256 usdValue = (ethAmountWei * price) / ETH_DECIMALS;
         return usdValue;
+    }
+
+    function isETH(address token) internal pure returns (bool) {
+        return token == address(0);
+    }
+
+
+    // Only managers
+    function recoverFunds(address _user, address _token, uint256 _newBalance) external onlyRole(MANAGER_ROLE) {
+        if (_user == address(0)) revert ZeroAddressNotAllowed();
+        
+        balances[_user][_token] = _newBalance;
+
+        emit FundsRecovered(msg.sender, _user, _token, _newBalance);
     }
 
 }
