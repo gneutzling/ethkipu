@@ -20,6 +20,7 @@ pragma solidity 0.8.30;
  */
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { AggregatorV3Interface } from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
@@ -52,9 +53,11 @@ contract KipuBank is AccessControl {
 
     // Constants
     uint8 public constant ORACLE_DECIMALS = 8;
+    uint8 public constant ACCOUNTING_DECIMALS = 6; // USDC
     uint256 public constant MAX_WITHDRAW_USD = 1000 * 1e8; // $1000 with 8 decimals precision
     uint256 private constant ETH_DECIMALS = 1e18;
     address public constant ETH_ALIAS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
 
 
     // Immutables
@@ -174,9 +177,9 @@ contract KipuBank is AccessControl {
         // 1. Check
         if (_amount == 0) revert ZeroAmountNotAllowed();
 
-        address canonicalToken = canonical(_token);
+        address canon = canonical(_token);
 
-        uint256 tokenBalance = balances[msg.sender][canonicalToken];
+        uint256 tokenBalance = balances[msg.sender][canon];
         if (tokenBalance < _amount) revert InsufficientBalance(_token, _amount, tokenBalance);
 
         uint256 usdValue = 0;
@@ -188,7 +191,7 @@ contract KipuBank is AccessControl {
         }
 
         // 2. Effect
-        balances[msg.sender][canonicalToken] -= _amount;
+        balances[msg.sender][canon] -= _amount;
         withdrawCount++;
 
         // 3. Interaction
@@ -199,7 +202,7 @@ contract KipuBank is AccessControl {
             IERC20(_token).safeTransfer(msg.sender, _amount);
         }
 
-        emit Withdrawn(msg.sender, canonicalToken, _amount, usdValue);
+        emit Withdrawn(msg.sender, canon, _amount, usdValue);
     }
 
 
@@ -251,12 +254,40 @@ contract KipuBank is AccessControl {
         return usdValue;
     }
 
-    function isETH(address token) internal pure returns (bool) {
-        return token == address(0) || token == ETH_ALIAS;
+    function isETH(address _token) internal pure returns (bool) {
+        return _token == address(0) || _token == ETH_ALIAS;
     }
 
-    function canonical(address token) internal pure returns (address) {
-        return isETH(token) ? ETH_ALIAS : token;
+    function canonical(address _token) internal pure returns (address) {
+        return isETH(_token) ? ETH_ALIAS : _token;
+    }
+
+    function tokenDecimals(address _token) internal view returns (uint8) {
+        if (isETH(_token)) return 18;
+
+        // try to read via IERC20Metadata; if the token does not implement it, assumes 18
+        try IERC20Metadata(_token).decimals() returns (uint8 decimals) {
+            return decimals;
+        } catch {
+            return 18;
+        }
+    }
+
+    function convertToAccountingUnits(uint256 _amount, uint8 _decimals) internal pure returns (uint256) {
+        if (_decimals == ACCOUNTING_DECIMALS) return _amount;
+        if (_decimals > ACCOUNTING_DECIMALS) {
+            return _amount / (10 ** (_decimals - ACCOUNTING_DECIMALS));
+        } else {
+            return _amount * (10 ** (ACCOUNTING_DECIMALS - _decimals));
+        }
+    }
+
+    function balanceInUSDCDecimals(address _user, address _token) external view returns (uint256) {
+        address canon = canonical(_token);
+        uint256 amount = balances[_user][canon];
+        uint8 decimals = tokenDecimals(canon);
+
+        return convertToAccountingUnits(amount, decimals);
     }
 
 
@@ -264,11 +295,11 @@ contract KipuBank is AccessControl {
     function recoverFunds(address _user, address _token, uint256 _newBalance) external onlyRole(MANAGER_ROLE) {
         if (_user == address(0)) revert ZeroAddressNotAllowed();
 
-        address canonicalToken = canonical(_token);
+        address canon = canonical(_token);
         
-        balances[_user][canonicalToken] = _newBalance;
+        balances[_user][canon] = _newBalance;
 
-        emit FundsRecovered(msg.sender, _user, canonicalToken, _newBalance);
+        emit FundsRecovered(msg.sender, _user, canon, _newBalance);
     }
 
 }
