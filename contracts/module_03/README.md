@@ -1,6 +1,40 @@
-# KipuBank - Multi-Token Ethereum Vault Contract
+# KipuBank V2 - Multi-Token Ethereum Vault Contract
 
 A comprehensive Ethereum smart contract that allows users to deposit and withdraw both ETH and ERC20 tokens with built-in safety limits and price protection. Think of it as a secure vault with advanced features to prevent misuse and protect against market volatility.
+
+## 🚀 High-Level Improvements Over Original KipuBank
+
+This version represents a significant evolution from the original KipuBank contract, implementing production-ready features and advanced Solidity patterns:
+
+### **1. Multi-Token Support & EIP-7528 Implementation**
+
+- **Original**: Only supported ETH deposits/withdrawals
+- **V2**: Full ERC20 token support with ETH represented using EIP-7528 standard (`0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`)
+- **Why**: Enables users to manage multiple assets in a single vault, increasing utility and adoption
+
+### **2. USD-Based Withdrawal Limits via Chainlink Oracle**
+
+- **Original**: Fixed 0.1 ETH withdrawal limit
+- **V2**: Dynamic $1000 USD limit calculated using real-time Chainlink ETH/USD price feeds
+- **Why**: Protects users from volatility while maintaining consistent purchasing power limits
+
+### **3. Role-Based Access Control**
+
+- **Original**: No administrative functions
+- **V2**: Manager role for fund recovery using OpenZeppelin AccessControl
+- **Why**: Enables emergency fund recovery while maintaining decentralization principles
+
+### **4. Advanced Type Safety & Gas Optimization**
+
+- **Original**: Basic uint256 types
+- **V2**: User-defined value types (Wei, Usd8, Usdc6) for compile-time safety
+- **Why**: Prevents unit confusion bugs and improves code readability
+
+### **5. Enhanced Security & Error Handling**
+
+- **Original**: Basic custom errors
+- **V2**: Comprehensive error system with detailed context, SafeERC20 for token transfers, and improved reentrancy protection
+- **Why**: Better debugging experience and protection against sophisticated attacks
 
 ---
 
@@ -117,7 +151,46 @@ For testing purposes, deploy the included `MockERC20.sol` contract:
 
 ---
 
+## 🔹 Design Decisions & Trade-offs
+
+### **Oracle Dependency vs. Fixed Limits**
+
+- **Decision**: Use Chainlink price feeds for dynamic USD limits
+- **Trade-off**: Introduces oracle dependency and potential single point of failure
+- **Mitigation**: Price validation ensures non-negative values, but doesn't prevent stale data attacks
+- **Alternative**: Could implement time-based price staleness checks for production use
+
+### **EIP-7528 vs. address(0) for ETH**
+
+- **Decision**: Use EIP-7528 standard (`0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`) for ETH representation
+- **Trade-off**: Slightly more gas cost vs. better industry standardization
+- **Benefit**: Follows established patterns used by major DeFi protocols
+
+### **Manager Role vs. Fully Decentralized**
+
+- **Decision**: Implement manager role for fund recovery
+- **Trade-off**: Centralization risk vs. user protection
+- **Mitigation**: Manager role is limited to balance adjustments only, cannot withdraw funds
+- **Alternative**: Could implement multi-sig or DAO governance for production
+
+### **USD Limits Only for ETH**
+
+- **Decision**: Apply $1000 USD limit only to ETH withdrawals, not ERC20 tokens
+- **Trade-off**: Inconsistent limits vs. practical usability
+- **Reasoning**: ERC20 tokens have their own volatility characteristics and USD conversion would require multiple oracles
+
+### **Fee-on-Transfer Token Handling**
+
+- **Decision**: Credit only actually received tokens (not approved amount)
+- **Trade-off**: Slightly more complex logic vs. protection against malicious tokens
+- **Benefit**: Prevents issues with tokens that charge fees on transfer
+
+---
+
 ## 🔹 Contract on Etherscan
 
-Test it on a public testnet:
-https://sepolia.etherscan.io/address/0x558288c1c1db5be897b09895bc8ed592ccc1f415
+**Deployed Contract Address:**
+https://testnet.routescan.io/address/0x718BAc356Def6665C9CAe381BE0ad3FF32926100/contract/11155111/code
+
+**Sepolia Testnet Verification:**
+Contract source code is verified and available for inspection on Routescan.
