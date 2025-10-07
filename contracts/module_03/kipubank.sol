@@ -20,7 +20,6 @@ contract KipuBank is AccessControl {
     uint8   public constant ORACLE_DECIMALS     = 8;
     uint8   public constant ACCOUNTING_DECIMALS = 6; // USDC-like accounting
     uint256 public constant MAX_WITHDRAW_USD    = 1000 * 1e8; // 8 decimals
-    uint256 public constant ORACLE_STALE_AFTER  = 1 hours;
     address public constant ETH_ALIAS           = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
     bytes32 public constant MANAGER_ROLE        = keccak256("MANAGER_ROLE");
 
@@ -64,7 +63,6 @@ contract KipuBank is AccessControl {
     error EtherTransferFailed(address recipient, uint256 amount);
     error ReentrancyDetected();
     error InvalidOraclePrice(int256 price);
-    error StaleOracleData(uint256 updatedAt);
     error ZeroAddressNotAllowed();
     error ZeroBankCapNotAllowed();
 
@@ -189,12 +187,9 @@ contract KipuBank is AccessControl {
 
     /// @notice Chainlink price with simple freshness window
     function getEthUsdPrice() internal view returns (uint256) {
-        ( , int256 answer, , uint256 updatedAt, ) = priceFeed.latestRoundData();
+        ( , int256 answer, , , ) = priceFeed.latestRoundData();
         
         if (answer <= 0) revert InvalidOraclePrice(answer);
-
-        // Reverts if the price update is older than ORACLE_STALE_AFTER.
-        if (block.timestamp - updatedAt > ORACLE_STALE_AFTER) revert StaleOracleData(updatedAt);
         
         return uint256(answer); // 8 decimals
     }

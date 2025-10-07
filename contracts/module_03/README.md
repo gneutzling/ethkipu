@@ -21,7 +21,7 @@ KipuBank implements a modern banking system with the following features:
 
 - **USD withdrawal limit**: Limits withdrawals to $1000 USD value per transaction (prevents large losses during price volatility).
 - **Bank capacity**: Prevents the contract from holding more ETH than intended.
-- **Price feed validation**: Ensures price data is fresh (max 1 hour old) and valid.
+- **Price feed validation**: Ensures price data is valid and non-negative.
 - **Reentrancy guard**: Uses a `noReentrancy` modifier to prevent malicious contract interactions.
 - **CEI pattern**: Implements Checks → Effects → Interactions for secure token transfers.
 - **Access control**: Manager role for administrative functions with proper role-based permissions.
@@ -101,7 +101,7 @@ Once deployed, the following functions are available:
 - All amounts are in **wei** for ETH (1 ETH = 10¹⁸ wei) and **token units** for ERC20 tokens.
 - ETH withdrawal limit is **$1000 USD** calculated using Chainlink price feeds (prevents large losses during volatility).
 - Bank capacity only applies to **ETH deposits** (ERC20 tokens have no capacity limit).
-- Price feed data must be **fresh** (max 1 hour old) for ETH withdrawals to succeed.
+- Price feed data must be **valid** (non-negative) for ETH withdrawals to succeed.
 - Contract uses **OpenZeppelin** libraries for security and **Chainlink** for price feeds.
 - **Manager role** can recover funds in emergency situations (requires proper access control).
 - Contract demonstrates **Solidity best practices**: CEI pattern, reentrancy protection, custom errors, typed values, and event emission.
